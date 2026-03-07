@@ -1,7 +1,7 @@
 {
     "name":  "sm-sql-core",
     "version":  "1.0.0",
-    "description":  "Domain-agnostic high-performance RAG storage and memory management engine for AI agents.",
+    "description":  "High-performance local RAG storage engine for autonomous AI agents, featuring dual-system architecture and zero binary dependencies.",
     "main":  "dist/index.js",
     "files":  [
                   "dist",
