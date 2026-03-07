@@ -1,4 +1,4 @@
-# SM-SQL Core
+# SM-SQL
 
 A Native, Dual-System Cognitive Memory Engine for Local AI Agents. Its name comes from my family name and it shows my respect to one of my friends.
 
