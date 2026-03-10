@@ -134,4 +134,3 @@ Internally, SM-SQL maintains a strict hierarchy:
 ## License
 
 ISC License. Built for Airi, open for all.
-```
