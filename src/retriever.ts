@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import { VaultManager } from './vault';
-import { ShadowIndex, BlockClass, IndexEntry } from './types';
+import { ShadowIndex, BlockClass, IndexEntry, MemoryBlockDTO } from './types';
+import { SemanticIntuition } from './engine/SemanticIntuition';
 
 export interface RetrievalTraceEntry {
     keyword: string;
@@ -12,8 +13,7 @@ export interface RetrievalTraceEntry {
 }
 
 export interface RetrievalResult {
-    content: string;
-    trace: RetrievalTraceEntry[];
+    blocks: MemoryBlockDTO[];
     timings: {
         indexSearch: number;
         sorting: number;
@@ -27,11 +27,13 @@ export class Retriever {
     private vaultPath: string;
     private pendingPath: string;
     private stopWords: Set<string>;
+    private semanticIntuition?: SemanticIntuition;
 
-    constructor(vaultManager: VaultManager, vaultPath: string, pendingPath: string) {
+    constructor(vaultManager: VaultManager, vaultPath: string, pendingPath: string, semanticIntuition?: SemanticIntuition) {
         this.vaultManager = vaultManager;
         this.vaultPath = vaultPath;
         this.pendingPath = pendingPath;
+        this.semanticIntuition = semanticIntuition;
         this.stopWords = new Set([
             'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'was',
             'this', 'that', 'with', 'from', 'have', 'has', 'had', 'they', 'our',
@@ -78,10 +80,16 @@ export class Retriever {
             .map(w => this.stemWord(w));
     }
 
+    private normalizeStoredContent(rawContent: string): string {
+        const lines = rawContent.split('\n');
+        const body = lines.slice(1).join('\n').replace(/\n---\s*$/, '').trim();
+        return body || rawContent.trim();
+    }
+
     /**
      * Executes System 1: Lightweight fuzzy search through the indexed tag graph.
      */
-    async fastRetrieve(userInput: string): Promise<RetrievalResult> {
+    async fastRetrieve(userInput: string, tags?: string[]): Promise<RetrievalResult> {
         const t0 = performance.now();
         const index = await this.vaultManager.readIndex();
 
@@ -113,10 +121,14 @@ export class Retriever {
                     for (const id of blockIds) {
                         const meta = index.index_table.get(id);
                         if (meta) {
+                            if (meta.isSuperseded) continue;
+                            if (tags && !tags.every(t => meta.tags.includes(t))) {
+                                continue;
+                            }
+
                             const existing = hitMap.get(id);
                             if (existing) {
                                 existing.hitCount++;
-                                // Keep the best (lowest distance) hit for the trace
                                 if (distance < existing.entry.distance) {
                                     existing.entry.distance = distance;
                                     existing.entry.keyword = queryKw;
@@ -142,15 +154,11 @@ export class Retriever {
         }
         const t2 = performance.now();
 
-        // Ranking: (Base Score * Hit Multiplier) + Recency - Distance
-        const trace = Array.from(hitMap.values()).map(h => {
-            // Apply additive scoring: hitCount bonus
+        let sortedBlocks = Array.from(hitMap.values()).map(h => {
             const hitMultiplier = 1 + (h.hitCount - 1) * 0.5;
             const updatedScore = h.entry.weightScore * hitMultiplier;
             return { ...h.entry, weightScore: updatedScore };
-        });
-
-        let sortedBlocks = trace.sort((a, b) => {
+        }).sort((a, b) => {
             const rawScoreA = a.weightScore * (1 + (a.timestamp / Date.now()));
             const accScoreA = rawScoreA - (a.distance * 0.5);
             const rawScoreB = b.weightScore * (1 + (b.timestamp / Date.now()));
@@ -158,27 +166,29 @@ export class Retriever {
             return accScoreB - accScoreA;
         }).slice(0, 10);
 
-        // Fallback: Priority blocks (Class S)
         if (sortedBlocks.length === 0) {
             const sBlocks = Array.from(index.index_table.values())
-                .filter(m => m.class === BlockClass.S)
+                .filter(m => {
+                    if (m.class !== BlockClass.S || m.isSuperseded) return false;
+                    if (tags && !tags.every(t => m.tags.includes(t))) return false;
+                    return true;
+                })
                 .sort((a, b) => b.timestamp - a.timestamp)
                 .slice(0, 2);
 
             for (const meta of sBlocks) {
                 sortedBlocks.push({
-                    keyword: "[FALLBACK]", matchedTag: "Priority_Block", blockId: meta.id,
+                    keyword: '[FALLBACK]', matchedTag: 'Priority_Block', blockId: meta.id,
                     weightScore: meta.multiplier, timestamp: meta.timestamp, distance: 0
                 });
             }
         }
         const t3 = performance.now();
-        const { content } = await this.materialize(sortedBlocks, index);
+        const blocks = await this.materialize(sortedBlocks, index);
         const t4 = performance.now();
 
         return {
-            content,
-            trace: sortedBlocks,
+            blocks,
             timings: {
                 indexSearch: parseFloat((t2 - t1).toFixed(4)),
                 sorting: parseFloat((t3 - t2).toFixed(4)),
@@ -188,79 +198,143 @@ export class Retriever {
         };
     }
 
-    private async materialize(blocks: RetrievalTraceEntry[], index: ShadowIndex): Promise<{ content: string }> {
-        let finalContent = "";
-        if (blocks.length > 0) {
-            const openFiles: Map<string, number> = new Map();
-            try {
-                for (const block of blocks) {
-                    const meta = index.index_table.get(block.blockId);
-                    if (!meta) continue;
+    /**
+     * Executes System 1-B: Rapid Hamming scan across precomputed binary signatures.
+     */
+    public async semanticRetrieve(querySignature: Uint8Array, tags?: string[]): Promise<RetrievalTraceEntry[]> {
+        const index = await this.vaultManager.readIndex();
 
-                    const filePath = meta.sourceFile === 'vault' ? this.vaultPath : this.pendingPath;
-                    if (!openFiles.has(filePath)) {
-                        try {
-                            openFiles.set(filePath, fs.openSync(filePath, 'r'));
-                        } catch (e) { continue; }
+        const candidates: { id: string, signature: Uint8Array }[] = [];
+        for (const [id, meta] of index.index_table) {
+            if (!meta.signature || meta.isSuperseded) continue;
+            if (tags && !tags.every(t => meta.tags.includes(t))) continue;
+            candidates.push({ id, signature: Uint8Array.from(Buffer.from(meta.signature, 'base64')) });
+        }
+
+        if (candidates.length === 0 || !this.semanticIntuition) return [];
+
+        const workerHits = await this.semanticIntuition.scan(querySignature, candidates);
+
+        return workerHits.map(hit => {
+            const meta = index.index_table.get(hit.id)!;
+            return {
+                keyword: '[SEMANTIC_OFFLOADED]',
+                matchedTag: 'Semantic_Intuition',
+                blockId: hit.id,
+                weightScore: meta.multiplier,
+                timestamp: meta.timestamp,
+                distance: hit.distance
+            };
+        });
+    }
+
+    public async materialize(blocks: RetrievalTraceEntry[], index: ShadowIndex): Promise<MemoryBlockDTO[]> {
+        const results: MemoryBlockDTO[] = [];
+        if (blocks.length === 0) {
+            return results;
+        }
+
+        const openFiles: Map<string, number> = new Map();
+        try {
+            for (const block of blocks) {
+                const meta = index.index_table.get(block.blockId);
+                if (!meta) continue;
+
+                const filePath = meta.sourceFile === 'vault' ? this.vaultPath : this.pendingPath;
+                if (!openFiles.has(filePath)) {
+                    try {
+                        openFiles.set(filePath, fs.openSync(filePath, 'r'));
+                    } catch {
+                        continue;
                     }
+                }
 
-                    const fd = openFiles.get(filePath)!;
-                    const length = meta.offset_end - meta.offset_start;
-                    const buffer = Buffer.alloc(length);
-                    fs.readSync(fd, buffer, 0, length, meta.offset_start);
-                    finalContent += buffer.toString('utf-8') + "\n";
-                }
-            } finally {
-                for (const fd of openFiles.values()) {
-                    try { fs.closeSync(fd); } catch { }
-                }
+                const fd = openFiles.get(filePath)!;
+                const length = meta.offset_end - meta.offset_start;
+                const buffer = Buffer.alloc(length);
+                fs.readSync(fd, buffer, 0, length, meta.offset_start);
+
+                results.push({
+                    id: block.blockId,
+                    content: this.normalizeStoredContent(buffer.toString('utf-8')),
+                    tags: meta.tags,
+                    class: meta.class,
+                    timestamp: meta.timestamp,
+                    score: parseFloat(block.weightScore.toFixed(2)),
+                    signature: meta.signature
+                });
+            }
+        } finally {
+            for (const fd of openFiles.values()) {
+                try { fs.closeSync(fd); } catch { }
             }
         }
-        return { content: finalContent.trim() };
+
+        return results;
+    }
+
+    public async materializedScan(limit: number = 100, cursor?: string, includeInactive: boolean = false): Promise<{ entries: MemoryBlockDTO[]; nextCursor?: string; generation: number }> {
+        // Read the index FIRST, before the scan. Both this call and the internal readIndex()
+        // inside scanMemories() will resolve to the same cached ShadowIndex object reference,
+        // eliminating the two-call window in which a writeMutex operation could mutate the
+        // index between the scan and the materialize pass, producing a skewed view.
+        const index = await this.vaultManager.readIndex();
+        const scanned = await this.vaultManager.scanMemories(limit, cursor, includeInactive);
+        const trace: RetrievalTraceEntry[] = scanned.entries.map(entry => ({
+            keyword: '[SCAN]',
+            matchedTag: 'N/A',
+            blockId: entry.id,
+            weightScore: entry.multiplier,
+            timestamp: entry.timestamp,
+            distance: 0
+        }));
+        const entries = await this.materialize(trace, index);
+        return {
+            entries,
+            nextCursor: scanned.nextCursor,
+            generation: scanned.generation
+        };
     }
 
     /**
      * Executes advanced search with time filters and pagination.
      */
-    async advancedSearch(params: { query?: string; fromTs?: number; toTs?: number; limit?: number; }): Promise<RetrievalResult> {
+    async advancedSearch(params: { query?: string; fromTs?: number; toTs?: number; limit?: number; tags?: string[]; }): Promise<RetrievalResult> {
         const t0 = performance.now();
         const index = await this.vaultManager.readIndex();
 
-        // 1. If query is provided, use the fuzzy tag search
         if (params.query) {
-            const baseResult = await this.fastRetrieve(params.query);
-            let filteredTrace = baseResult.trace;
+            const baseResult = await this.fastRetrieve(params.query, params.tags);
+            let filteredBlocks = baseResult.blocks;
 
-            if (params.fromTs) filteredTrace = filteredTrace.filter(t => t.timestamp >= params.fromTs!);
-            if (params.toTs) filteredTrace = filteredTrace.filter(t => t.timestamp <= params.toTs!);
-            if (params.limit) filteredTrace = filteredTrace.slice(0, params.limit);
+            if (params.fromTs) filteredBlocks = filteredBlocks.filter(b => b.timestamp >= params.fromTs!);
+            if (params.toTs) filteredBlocks = filteredBlocks.filter(b => b.timestamp <= params.toTs!);
+            if (params.limit) filteredBlocks = filteredBlocks.slice(0, params.limit);
 
-            const { content } = await this.materialize(filteredTrace, index);
             return {
-                content,
-                trace: filteredTrace,
+                blocks: filteredBlocks,
                 timings: { ...baseResult.timings, total: parseFloat((performance.now() - t0).toFixed(4)) }
             };
         }
 
-        // 2. Pure chronological fetch
-        let blocks = Array.from(index.index_table.values());
-        if (params.fromTs) blocks = blocks.filter(b => b.timestamp >= params.fromTs!);
-        if (params.toTs) blocks = blocks.filter(b => b.timestamp <= params.toTs!);
+        let entries = Array.from(index.index_table.values());
+        entries = entries.filter(b => !b.isSuperseded);
+        if (params.fromTs) entries = entries.filter(b => b.timestamp >= params.fromTs!);
+        if (params.toTs) entries = entries.filter(b => b.timestamp <= params.toTs!);
+        if (params.tags) entries = entries.filter(b => params.tags!.every(t => b.tags.includes(t)));
 
-        const sorted = blocks.sort((a, b) => b.timestamp - a.timestamp).slice(0, params.limit || 10);
+        const sorted = entries.sort((a, b) => b.timestamp - a.timestamp).slice(0, params.limit || 10);
         const trace: RetrievalTraceEntry[] = sorted.map(b => ({
-            keyword: "[TIME_FETCH]", matchedTag: "N/A", blockId: b.id,
+            keyword: '[TIME_FETCH]', matchedTag: 'N/A', blockId: b.id,
             weightScore: b.multiplier, timestamp: b.timestamp, distance: 0
         }));
 
         const t1 = performance.now();
-        const { content } = await this.materialize(trace, index);
+        const results = await this.materialize(trace, index);
         const t2 = performance.now();
 
         return {
-            content,
-            trace,
+            blocks: results,
             timings: {
                 indexSearch: 0,
                 sorting: parseFloat((t1 - t0).toFixed(4)),

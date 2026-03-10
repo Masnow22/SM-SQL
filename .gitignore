@@ -1,9 +1,14 @@
-﻿node_modules/
+﻿# 基础忽略
+node_modules/
 dist/
 .env
-.env.*
-sm_sql_vault/
-sm_sql_vault_demo/
-airi_hippocampus/
-*.log
+
+# 封杀所有以 sm_sql 开头的文件夹（中间带什么都行）
+sm_sql_*/
+airi_hippocampus*/
+
+# 封杀特定的临时文件
+*.jsonl
+*.txt
+*.bak
 *.tmp

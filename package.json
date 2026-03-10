@@ -1,34 +1,54 @@
 {
-    "name":  "sm-sql-core",
-    "version":  "1.0.0",
-    "description":  "Domain-agnostic high-performance RAG storage and memory management engine for AI agents.",
-    "main":  "dist/index.js",
-    "files":  [
-                  "dist",
-                  "README.md"
-              ],
-    "types":  "dist/index.d.ts",
-    "scripts":  {
-                    "build":  "tsc",
-                    "test":  "echo \"Error: no test specified\" \u0026\u0026 exit 1",
-                    "prepack":  "npm run build"
-                },
-    "keywords":  [
-                     "sm-sql",
-                     "rag",
-                     "memory",
-                     "storage",
-                     "ai",
-                     "agent"
-                 ],
-    "author":  "",
-    "license":  "ISC",
-    "type":  "commonjs",
-    "devDependencies":  {
-                            "@types/node":  "^25.3.3",
-                            "typescript":  "^5.9.3"
-                        },
-    "dependencies":  {
-                         "openai":  "^6.25.0"
-                     }
+  "name": "sm-sql-core",
+  "version": "1.1.0-alpha",
+  "description": "Domain-agnostic high-performance RAG storage and memory management engine for AI agents.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./agent": {
+      "types": "./dist/agent/index.d.ts",
+      "require": "./dist/agent/index.js",
+      "default": "./dist/agent/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "chat": "tsx examples/chat.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "bench": "vitest bench",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "sm-sql",
+    "rag",
+    "memory",
+    "storage",
+    "ai",
+    "agent"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.1.1"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.3.3",
+    "dotenv": "^17.3.1",
+    "openai": "^6.25.0"
+  }
 }

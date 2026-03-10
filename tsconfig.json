@@ -1,16 +1,22 @@
 {
-    "compilerOptions":  {
-                            "target":  "ESNext",
-                            "module":  "CommonJS",
-                            "strict":  true,
-                            "esModuleInterop":  true,
-                            "skipLibCheck":  true,
-                            "forceConsistentCasingInFileNames":  true,
-                            "outDir":  "./dist",
-                            "rootDir":  "./src",
-                            "declaration":  true
-                        },
-    "include":  [
-                    "src/**/*"
-                ]
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "outDir": "./dist",
+    "rootDir": "./",
+    "declaration": true,
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "src/**/*",
+    "examples/**/*",
+    "*.ts"
+  ]
 }

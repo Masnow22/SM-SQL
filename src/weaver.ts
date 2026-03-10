@@ -4,6 +4,7 @@ import * as path from 'path';
 import OpenAI from 'openai';
 import { VaultManager } from './vault';
 import { BlockClass, BlockMultipliers, ShadowIndex, IndexEntry, SMSQLConfig } from './types';
+import { SemanticIntuition } from './engine/SemanticIntuition';
 
 class AsyncMutex {
     private queue: Promise<void> = Promise.resolve();
@@ -19,12 +20,14 @@ export class Weaver {
     private vaultManager: VaultManager;
     private client: OpenAI | undefined;
     private config: SMSQLConfig;
+    private semanticIntuition: SemanticIntuition | undefined;
     private writeMutex = new AsyncMutex();
 
-    constructor(vaultManager: VaultManager, client: OpenAI | undefined, config: SMSQLConfig) {
+    constructor(vaultManager: VaultManager, client: OpenAI | undefined, config: SMSQLConfig, semanticIntuition?: SemanticIntuition) {
         this.vaultManager = vaultManager;
         this.client = client;
         this.config = config;
+        this.semanticIntuition = semanticIntuition;
     }
 
     private getSystemPrompt(): string {
@@ -57,6 +60,7 @@ Output Format (STRICT JSON):
         if (!this.client) {
             throw new Error('LLM Client (OpenAI) is required for Weaver consolidation. Please provide it in SMSQLConfig.');
         }
+        const startTime = Date.now();
         const pendingPath = path.join(baseDir, 'pending.txt');
         const processingTmpPath = path.join(baseDir, 'processing.tmp');
         const vaultPath = path.join(baseDir, 'vault.txt');
@@ -103,7 +107,19 @@ Output Format (STRICT JSON):
                 const currentVaultStats = await fs.stat(vaultPath);
                 const offset_start = currentVaultStats.size;
 
-                const entry = `[${blockId}] [${block.class}] [${new Date(timestamp).toISOString()}]\n${block.content}\n---\n`;
+                // Binary Semantic Encoding for consolidated blocks
+                let sigBase64: string | undefined;
+                if (this.semanticIntuition?.isEnabled()) {
+                    try {
+                        const sig = await this.semanticIntuition.encode(block.content);
+                        sigBase64 = Buffer.from(sig).toString('base64');
+                    } catch (e) {
+                        console.warn(`[Weaver: IO] ⚠️ Failed to encode consolidated block:`, e);
+                    }
+                }
+
+                const sigTag = sigBase64 ? ` [SIG:${sigBase64}]` : '';
+                const entry = `[${blockId}] [${block.class}] [${new Date(timestamp).toISOString()}]${sigTag}\n${block.content}\n---\n`;
                 const entryBuffer = Buffer.from(entry, 'utf-8');
 
                 await fs.appendFile(vaultPath, entryBuffer);
@@ -122,7 +138,8 @@ Output Format (STRICT JSON):
                     offset_start,
                     offset_end,
                     timestamp,
-                    tags: block.tags || []
+                    tags: block.tags || [],
+                    signature: sigBase64
                 };
 
                 await fs.appendFile(indexLogPath, JSON.stringify(indexEntry) + '\n', 'utf-8');
@@ -132,8 +149,7 @@ Output Format (STRICT JSON):
         await fs.unlink(processingTmpPath);
         console.log('[Weaver: IO] ✨ Weaving complete.');
 
-        await this.vaultManager.clearCache();
-        await this.vaultManager.readIndex();
+        await this.vaultManager.rebuildIndexAfterWeaving(startTime);
     }
 
     private isValidWeaverOutput(data: any): data is { blocks: any[] } {
@@ -149,7 +165,7 @@ Output Format (STRICT JSON):
     private async categorizeLogs(content: string): Promise<any[]> {
         if (!this.client) throw new Error('LLM Client not initialized.');
         const response = await this.client.chat.completions.create({
-            model: process.env.MODEL_NAME || "gpt-4-turbo-preview",
+            model: this.config.modelName || process.env.SMSQL_LLM_MODEL || 'gpt-4o',
             messages: [
                 { role: "system", content: this.getSystemPrompt() },
                 { role: "user", content: `Categorize these logs:\n${content}` }
