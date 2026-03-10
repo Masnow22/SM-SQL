@@ -1,4 +1,3 @@
-```md
 # SM-SQL Core
 
 A Native, Tri-System Cognitive Memory Engine for Local AI Agents.
