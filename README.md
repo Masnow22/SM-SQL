@@ -17,7 +17,7 @@ Thus, SM-SQL was born. It is a Zero Database Binaries, local-first database buil
 
 The next goal is to bridge this 'hippocampus' back to Airi, completing the circle of her memory through future integrations.
 
-And perhaps one day, when everyone of us has our own AI, SM-SQL will make it possible to take control of our own data.
+And perhaps one day, when everyone of us has his/hers own AI, SM-SQL will make it possible to take control of our own data.
 
 ## Tri-System Cognitive Architecture
 
